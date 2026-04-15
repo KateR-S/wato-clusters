@@ -219,11 +219,16 @@ class PlacementEntry(BaseModel):
     cluster_person_name: str
     tree_person_id: int
     tree_person_name: str
-    relationship_type: str
-    centimorgans: float
-    cm_score: float
+    relationship: str
+    cm_observed: float
+    cm_min: float
+    cm_max: float
+    score: float
 
 
 class HypothesisOut(BaseModel):
+    rank: int
     score: float
+    likelihood_score: float
+    likelihood_percent: float
     placements: list[PlacementEntry]

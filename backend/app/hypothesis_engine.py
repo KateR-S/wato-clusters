@@ -39,6 +39,46 @@ CM_RANGES: dict[str, tuple[float, float]] = {
     "half_1st_cousin": (0, 449),
 }
 
+# Generational distance: how many generations OLDER the tree person is
+# relative to the cluster person. Positive = tree person is older.
+# None = ambiguous (e.g., cousin-once-removed can be older or younger branch).
+GEN_DIST: dict[str, Optional[int]] = {
+    "parent": 1,
+    "child": -1,
+    "full_sibling": 0,
+    "half_sibling": 0,
+    "grandparent": 2,
+    "grandchild": -2,
+    "aunt_uncle": 1,
+    "niece_nephew": -1,
+    "half_aunt_uncle": 1,
+    "half_niece_nephew": -1,
+    "great_grandparent": 3,
+    "great_grandchild": -3,
+    "1st_cousin": 0,
+    "half_1st_cousin": 0,
+    "1st_cousin_1r": None,   # ambiguous: older or younger branch
+    "2nd_cousin": 0,
+    "1st_cousin_2r": None,   # ambiguous
+    "2nd_cousin_1r": None,   # ambiguous
+    "3rd_cousin": 0,
+}
+
+# Generational delta for cluster relationships: how many generations older
+# person1 is relative to person2 in the cluster. Positive = person1 is older.
+CLUSTER_GEN_DELTA: dict[str, int] = {
+    "parent": 1,
+    "child": -1,
+    "full_sibling": 0,
+    "half_sibling": 0,
+    "half_parent": 1,
+    "half_child": -1,
+    "spouse": 0,
+}
+
+AVG_GEN_YEARS = 25       # average years per generation
+GEN_BIRTH_TOLERANCE = 1.5  # allow ±1.5 generation tolerance in birth year checks
+
 MIN_PARENT_AGE = 14
 
 
@@ -49,6 +89,7 @@ class Placement:
     cluster_person_name: str
     tree_person_id: int
     tree_person_name: str
+    tree_person_birth_year: Optional[int]
     relationship_type: str
     centimorgans: float
     cm_score: float  # 0-1, how central the cM is to the expected range
@@ -117,11 +158,13 @@ def generate_hypotheses(
     person (all cluster members that have matches must be placed).  Consistency
     means the inter-cluster relationships are respected: if cluster person A is
     the parent of cluster person B, then the tree placements for A and B must
-    be consistent with that (we check birth-year ordering at minimum; a full
-    relational consistency check would require full tree traversal, which is
-    done here at a lightweight level).
+    reflect that generational ordering.  For every cluster relationship between
+    two placed persons, we compute the expected generational difference between
+    their respective tree-person matches and reject combinations where that
+    difference is violated (exactly for same-tree-person pairs; within a
+    birth-year tolerance for different-tree-person pairs).
 
-    Each hypothesis is scored as the product of individual cm_scores and
+    Each hypothesis is scored as the geometric mean of individual cm_scores and
     returned sorted descending.
     """
     # ── Load data ─────────────────────────────────────────────────────────────
@@ -166,6 +209,7 @@ def generate_hypotheses(
                         cluster_person_name=cp.name,
                         tree_person_id=tp.id,
                         tree_person_name=f"{tp.first_name} {tp.last_name}".strip(),
+                        tree_person_birth_year=tp.birth_year,
                         relationship_type=rel_type,
                         centimorgans=cm,
                         cm_score=score,
@@ -182,52 +226,50 @@ def generate_hypotheses(
     cp_ids = list(candidates.keys())
     candidate_lists = [candidates[cid] for cid in cp_ids]
 
-    hypotheses: list[HypothesisOut] = []
-
-    # Cap combinations to avoid explosion
-    MAX_COMBINATIONS = 5000
-    total = 1
-    for lst in candidate_lists:
-        total *= len(lst)
-        if total > MAX_COMBINATIONS:
-            break
+    raw_hypotheses: list[tuple[float, list[PlacementEntry]]] = []
 
     for combo in product(*candidate_lists):
         # combo is a tuple of Placement, one per cluster person
         if not _combo_consistent(combo, cluster_rels):
             continue
 
-        score = 1.0
-        for p in combo:
-            score *= p.cm_score
-        # Geometric mean: numerically stable via log/exp when all scores > 0
-        if combo and score > 0:
-            score = math.exp(
-                sum(math.log(p.cm_score) for p in combo) / len(combo)
-            )
-        elif combo:
-            score = 0.0
-
-        hypotheses.append(
-            HypothesisOut(
-                score=round(score, 6),
-                placements=[
-                    PlacementEntry(
-                        cluster_person_id=p.cluster_person_id,
-                        cluster_person_name=p.cluster_person_name,
-                        tree_person_id=p.tree_person_id,
-                        tree_person_name=p.tree_person_name,
-                        relationship_type=p.relationship_type,
-                        centimorgans=p.centimorgans,
-                        cm_score=round(p.cm_score, 6),
-                    )
-                    for p in combo
-                ],
-            )
+        if not combo:
+            continue
+        score = math.exp(
+            sum(math.log(p.cm_score) for p in combo) / len(combo)
         )
 
-    hypotheses.sort(key=lambda h: h.score, reverse=True)
-    return hypotheses[:100]  # return top 100
+        placements = [
+            PlacementEntry(
+                cluster_person_id=p.cluster_person_id,
+                cluster_person_name=p.cluster_person_name,
+                tree_person_id=p.tree_person_id,
+                tree_person_name=p.tree_person_name,
+                relationship=p.relationship_type,
+                cm_observed=p.centimorgans,
+                cm_min=CM_RANGES[p.relationship_type][0],
+                cm_max=CM_RANGES[p.relationship_type][1],
+                score=round(p.cm_score, 6),
+            )
+            for p in combo
+        ]
+        raw_hypotheses.append((score, placements))
+
+    raw_hypotheses.sort(key=lambda x: x[0], reverse=True)
+    raw_hypotheses = raw_hypotheses[:100]
+
+    total_score = sum(s for s, _ in raw_hypotheses)
+
+    return [
+        HypothesisOut(
+            rank=i + 1,
+            score=round(score, 6),
+            likelihood_score=round(score, 6),
+            likelihood_percent=round((score / total_score) * 100, 4) if total_score > 0 else 0.0,
+            placements=placements,
+        )
+        for i, (score, placements) in enumerate(raw_hypotheses)
+    ]
 
 
 def _combo_consistent(
@@ -235,10 +277,18 @@ def _combo_consistent(
     cluster_rels: list[models.ClusterRelationship],
 ) -> bool:
     """
-    Lightweight consistency check for a combination of placements.
+    Consistency check for a combination of placements against the declared
+    inter-cluster relationships.
 
-    Checks that for every cluster relationship (e.g. A is parent of B), the
-    corresponding tree placements have compatible birth years.
+    For every cluster relationship between two placed cluster persons, we
+    derive the expected generational difference between their respective tree-
+    person matches and reject the combination when that expectation is violated:
+
+    - Same tree person: the generational distance of that person from each
+      cluster person must differ by exactly the inter-cluster generation gap.
+    - Different tree persons: when both birth years are known we verify that
+      the birth-year difference is consistent with the expected generational
+      gap (within ±1.5 generation tolerance).
     """
     placement_by_cp: dict[int, Placement] = {p.cluster_person_id: p for p in combo}
 
@@ -248,19 +298,35 @@ def _combo_consistent(
         if p1 is None or p2 is None:
             continue  # one side not placed — skip
 
-        # Use the tree person birth years to validate ordering
-        # The cluster relationship describes person1 -> person2
-        # We mirror birth-year logic: if cluster says person1 is parent of
-        # person2, then tree placements' birth years should respect that.
-        # We only check when relationship implies ordering.
-        rt = rel.rel_type
-        if rt in ("parent", "half_parent"):
-            # p1 is parent → p1's tree person must be older than p2's tree person
-            # We use the cluster person birth years here since tree people may
-            # not be directly related
-            if p1.cluster_person_id and p2.cluster_person_id:
-                pass  # already validated per-placement above
-        # For sibling-type rels we just accept (hard to disprove without
-        # full tree traversal)
+        c_delta = CLUSTER_GEN_DELTA.get(rel.rel_type)
+        if c_delta is None:
+            continue  # unknown cluster relationship type — skip
+
+        d1 = GEN_DIST.get(p1.relationship_type)
+        d2 = GEN_DIST.get(p2.relationship_type)
+        if d1 is None or d2 is None:
+            continue  # ambiguous generational distance — skip
+
+        # Expected generational difference between the two tree persons:
+        # tp1 should be (c_delta + d1 - d2) generations older than tp2.
+        # Derivation: G_tp1 = G_cp1 + d1; G_tp2 = G_cp2 + d2;
+        #             G_cp1 - G_cp2 = c_delta  →  G_tp1 - G_tp2 = c_delta + d1 - d2
+        expected_tp_gen_diff = c_delta + d1 - d2
+
+        if p1.tree_person_id == p2.tree_person_id:
+            # Same tree person: the generational gap between the two cluster
+            # persons as seen from the same tree node must be zero.
+            if expected_tp_gen_diff != 0:
+                return False
+        else:
+            # Different tree persons: use birth years when available.
+            by1 = p1.tree_person_birth_year
+            by2 = p2.tree_person_birth_year
+            if by1 is not None and by2 is not None:
+                # tp1 older by expected_tp_gen_diff gens means tp1 born earlier,
+                # i.e., by2 - by1 ≈ expected_tp_gen_diff * AVG_GEN_YEARS
+                actual_gen_diff = (by2 - by1) / AVG_GEN_YEARS
+                if abs(actual_gen_diff - expected_tp_gen_diff) > GEN_BIRTH_TOLERANCE:
+                    return False
 
     return True

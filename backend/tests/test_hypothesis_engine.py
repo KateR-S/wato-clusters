@@ -112,7 +112,7 @@ def test_generate_hypotheses_basic(db):
 
     # Best hypothesis should include 1st_cousin
     top = hypotheses[0]
-    rel_types = {p.relationship_type for p in top.placements}
+    rel_types = {p.relationship for p in top.placements}
     assert "1st_cousin" in rel_types
 
 
@@ -178,7 +178,88 @@ def test_generate_hypotheses_birth_year_prunes_parent(db):
     for hyp in hypotheses:
         for placement in hyp.placements:
             assert not (
-                placement.relationship_type == "parent"
+                placement.relationship == "parent"
                 and placement.tree_person_id == tp.id
                 and placement.cluster_person_id == cp.id
             ), "Parent relationship should have been pruned by birth year constraint"
+
+
+def test_sibling_consistency_same_tree_person(db):
+    """
+    Two cluster half-siblings that both match the same tree person must be
+    placed at the same generational distance from that tree person.
+    A combo where one is 'great_grandparent' (gen +3) and the other is
+    '1st_cousin' (gen 0) must be rejected.
+    """
+    from app.auth import hash_password
+    from app.hypothesis_engine import _combo_consistent, Placement
+    import app.models as m
+
+    # Build minimal model stubs via the DB to get real IDs
+    user = m.User(email="sib@test.com", hashed_password=hash_password("pw"))
+    db.add(user)
+    db.flush()
+
+    tree = m.Tree(user_id=user.id, name="T")
+    db.add(tree)
+    db.flush()
+
+    tp = m.Person(tree_id=tree.id, first_name="Shared", last_name="", birth_year=1930, sex="M")
+    db.add(tp)
+    db.flush()
+
+    cluster = m.Cluster(user_id=user.id, name="C")
+    db.add(cluster)
+    db.flush()
+
+    cp_a = m.ClusterPerson(cluster_id=cluster.id, name="Sibling A", birth_year=1970)
+    cp_b = m.ClusterPerson(cluster_id=cluster.id, name="Sibling B", birth_year=1972)
+    db.add_all([cp_a, cp_b])
+    db.flush()
+
+    rel = m.ClusterRelationship(
+        cluster_id=cluster.id,
+        person1_id=cp_a.id,
+        person2_id=cp_b.id,
+        rel_type="half_sibling",
+    )
+    db.add(rel)
+    db.commit()
+
+    # Inconsistent: great_grandparent (gen +3) vs 1st_cousin (gen 0) for same tree person
+    placement_a = Placement(
+        cluster_person_id=cp_a.id, cluster_person_name="Sibling A",
+        tree_person_id=tp.id, tree_person_name="Shared",
+        tree_person_birth_year=tp.birth_year,
+        relationship_type="great_grandparent",
+        centimorgans=400.0, cm_score=0.5,
+    )
+    placement_b = Placement(
+        cluster_person_id=cp_b.id, cluster_person_name="Sibling B",
+        tree_person_id=tp.id, tree_person_name="Shared",
+        tree_person_birth_year=tp.birth_year,
+        relationship_type="1st_cousin",
+        centimorgans=850.0, cm_score=0.8,
+    )
+    assert not _combo_consistent((placement_a, placement_b), [rel]), (
+        "Same-tree-person combo with gen dist +3 vs 0 for half-siblings must be rejected"
+    )
+
+    # Consistent: both are '1st_cousin' (gen 0) of the same tree person
+    placement_b_ok = Placement(
+        cluster_person_id=cp_b.id, cluster_person_name="Sibling B",
+        tree_person_id=tp.id, tree_person_name="Shared",
+        tree_person_birth_year=tp.birth_year,
+        relationship_type="1st_cousin",
+        centimorgans=850.0, cm_score=0.8,
+    )
+    placement_a_ok = Placement(
+        cluster_person_id=cp_a.id, cluster_person_name="Sibling A",
+        tree_person_id=tp.id, tree_person_name="Shared",
+        tree_person_birth_year=tp.birth_year,
+        relationship_type="1st_cousin",
+        centimorgans=900.0, cm_score=0.9,
+    )
+    assert _combo_consistent((placement_a_ok, placement_b_ok), [rel]), (
+        "Same-tree-person combo with equal gen dist for half-siblings must be accepted"
+    )

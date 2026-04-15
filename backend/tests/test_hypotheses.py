@@ -55,8 +55,11 @@ def test_generate_hypotheses(client, headers, tree, cluster):
     assert len(hypotheses) > 0
     # Each hypothesis should have a score and placements
     h = hypotheses[0]
+    assert "rank" in h
     assert "score" in h
+    assert "likelihood_percent" in h
     assert "placements" in h
+    assert h["rank"] == 1
     assert h["score"] > 0
     # Best hypothesis should contain the cluster person with a cM match
     cp_ids = [p["cluster_person_id"] for p in h["placements"]]
@@ -136,7 +139,7 @@ def test_birth_year_constraint_respected(client, headers, tree, cluster):
     for hyp in hypotheses:
         for placement in hyp["placements"]:
             if placement["tree_person_id"] == tp["id"] and placement["cluster_person_id"] == cp["id"]:
-                if placement["relationship_type"] == "parent":
+                if placement["relationship"] == "parent":
                     # parent means tp is parent of cp: tp birth (1990) must be >= 14 before cp birth (1989)
                     # 1989 - 1990 = -1, which is < 14, so this should NOT appear
                     pytest.fail(
