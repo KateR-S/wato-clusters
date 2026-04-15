@@ -97,7 +97,7 @@ export const deleteMatch = async (treeId: number, matchId: number): Promise<void
 
 // Hypotheses
 export const getHypotheses = async (treeId: number, clusterId: number): Promise<Hypothesis[]> => {
-  const res = await api.get<Hypothesis[]>(`/trees/${treeId}/hypotheses?cluster_id=${clusterId}`);
+  const res = await api.post<Hypothesis[]>(`/trees/${treeId}/hypotheses`, { cluster_id: clusterId });
   return res.data;
 };
 
