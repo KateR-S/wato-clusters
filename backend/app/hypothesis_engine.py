@@ -235,6 +235,8 @@ def generate_hypotheses(
 
         if not combo:
             continue
+        if any(p.cm_score <= 0 for p in combo):
+            continue
         score = math.exp(
             sum(math.log(p.cm_score) for p in combo) / len(combo)
         )

@@ -246,19 +246,19 @@ def test_sibling_consistency_same_tree_person(db):
     )
 
     # Consistent: both are '1st_cousin' (gen 0) of the same tree person
-    placement_b_ok = Placement(
-        cluster_person_id=cp_b.id, cluster_person_name="Sibling B",
-        tree_person_id=tp.id, tree_person_name="Shared",
-        tree_person_birth_year=tp.birth_year,
-        relationship_type="1st_cousin",
-        centimorgans=850.0, cm_score=0.8,
-    )
     placement_a_ok = Placement(
         cluster_person_id=cp_a.id, cluster_person_name="Sibling A",
         tree_person_id=tp.id, tree_person_name="Shared",
         tree_person_birth_year=tp.birth_year,
         relationship_type="1st_cousin",
         centimorgans=900.0, cm_score=0.9,
+    )
+    placement_b_ok = Placement(
+        cluster_person_id=cp_b.id, cluster_person_name="Sibling B",
+        tree_person_id=tp.id, tree_person_name="Shared",
+        tree_person_birth_year=tp.birth_year,
+        relationship_type="1st_cousin",
+        centimorgans=850.0, cm_score=0.8,
     )
     assert _combo_consistent((placement_a_ok, placement_b_ok), [rel]), (
         "Same-tree-person combo with equal gen dist for half-siblings must be accepted"
