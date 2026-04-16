@@ -150,22 +150,25 @@ def generate_hypotheses(
 
     Strategy
     --------
-    For each cluster person that has at least one cM match to a tree person:
-      - enumerate every (tree_person, relationship_type) pair whose cM range
-        contains the observed cM value and whose birth years are compatible.
+    Every recorded (cluster_person, tree_person) cM match defines a pair.
+    For each such pair we enumerate every relationship type whose cM range
+    contains the observed value and whose birth years are compatible.
 
-    A *hypothesis* is a consistent assignment of one placement per cluster
-    person (all cluster members that have matches must be placed).  Consistency
-    means the inter-cluster relationships are respected: if cluster person A is
-    the parent of cluster person B, then the tree placements for A and B must
-    reflect that generational ordering.  For every cluster relationship between
-    two placed persons, we compute the expected generational difference between
-    their respective tree-person matches and reject combinations where that
-    difference is violated (exactly for same-tree-person pairs; within a
-    birth-year tolerance for different-tree-person pairs).
+    A *hypothesis* is one consistent assignment of a relationship type to
+    every match pair.  Every hypothesis therefore contains exactly one
+    PlacementEntry per (cluster_person, tree_person) match pair — giving the
+    full cross-product view requested by the user.
 
-    Each hypothesis is scored as the geometric mean of individual cm_scores and
-    returned sorted descending.
+    Consistency means that for every cluster relationship (e.g. A is the
+    half-sibling of B), all placements involving A and B must respect the
+    implied generational ordering:
+      - When A and B are both matched to the same tree person, the
+        generational distances must satisfy the cluster relationship exactly.
+      - When they are matched to different tree persons, birth years are used
+        as a proxy (within ±1.5 generation tolerance).
+
+    Each hypothesis is scored as the geometric mean of individual cm_scores
+    and returned sorted descending.
     """
     # ── Load data ─────────────────────────────────────────────────────────────
     tree_people: dict[int, models.Person] = {p.id: p for p in tree.people}
@@ -181,19 +184,22 @@ def generate_hypotheses(
     if not matches_by_cp:
         return []
 
-    # ── Build candidate placements per cluster person ─────────────────────────
-    # candidates[cp_id] = list of Placement objects
-    candidates: dict[int, list[Placement]] = {}
+    # ── Build candidate relationship types per (cluster_person, tree_person) pair ─
+    # pair_candidates[(cp_id, tp_id)] = list of Placement, one per valid rel type.
+    # The enumeration picks exactly ONE element from each list, so every hypothesis
+    # contains one PlacementEntry per match pair.
+    pair_candidates: dict[tuple[int, int], list[Placement]] = {}
 
     for cp_id, matches in matches_by_cp.items():
         cp = cluster_people[cp_id]
-        cp_candidates: list[Placement] = []
 
         for match in matches:
             tp = tree_people.get(match.person_id)
             if tp is None:
                 continue
             cm = match.centimorgans
+            pair = (cp_id, tp.id)
+            pair_cands: list[Placement] = []
 
             for rel_type, (lo, hi) in CM_RANGES.items():
                 if cm < lo or cm > hi:
@@ -203,7 +209,7 @@ def generate_hypotheses(
                     continue
                 if not _birth_year_ok(tp.birth_year, cp.birth_year, rel_type):
                     continue
-                cp_candidates.append(
+                pair_cands.append(
                     Placement(
                         cluster_person_id=cp_id,
                         cluster_person_name=cp.name,
@@ -216,27 +222,26 @@ def generate_hypotheses(
                     )
                 )
 
-        if cp_candidates:
-            candidates[cp_id] = cp_candidates
+            if pair_cands:
+                pair_candidates[pair] = pair_cands
 
-    if not candidates:
+    if not pair_candidates:
         return []
 
     # ── Enumerate hypothesis combinations ────────────────────────────────────
-    cp_ids = list(candidates.keys())
-    candidate_lists = [candidates[cid] for cid in cp_ids]
+    # product picks one rel-type assignment per (cp, tp) pair.
+    candidate_lists = list(pair_candidates.values())
 
     raw_hypotheses: list[tuple[float, list[PlacementEntry]]] = []
 
     for combo in product(*candidate_lists):
-        # combo is a tuple of Placement, one per cluster person
-        if not _combo_consistent(combo, cluster_rels):
-            continue
-
         if not combo:
             continue
         if any(p.cm_score <= 0 for p in combo):
             continue
+        if not _combo_consistent(combo, cluster_rels):
+            continue
+
         score = math.exp(
             sum(math.log(p.cm_score) for p in combo) / len(combo)
         )
@@ -282,53 +287,56 @@ def _combo_consistent(
     Consistency check for a combination of placements against the declared
     inter-cluster relationships.
 
-    For every cluster relationship between two placed cluster persons, we
-    derive the expected generational difference between their respective tree-
-    person matches and reject the combination when that expectation is violated:
+    A combo now contains one Placement per (cluster_person, tree_person) match
+    pair, so each cluster person may have multiple placements.  For every
+    cluster relationship between two cluster persons we check every combination
+    of their respective placements:
 
-    - Same tree person: the generational distance of that person from each
-      cluster person must differ by exactly the inter-cluster generation gap.
+    - Same tree person: the expected generational difference between the two
+      tree placements must be exactly zero (a single node cannot be at two
+      different generational positions simultaneously).
     - Different tree persons: when both birth years are known we verify that
       the birth-year difference is consistent with the expected generational
       gap (within ±1.5 generation tolerance).
     """
-    placement_by_cp: dict[int, Placement] = {p.cluster_person_id: p for p in combo}
+    # Group placements by cluster person (multiple entries per cp in new model)
+    placements_by_cp: dict[int, list[Placement]] = {}
+    for p in combo:
+        placements_by_cp.setdefault(p.cluster_person_id, []).append(p)
 
     for rel in cluster_rels:
-        p1 = placement_by_cp.get(rel.person1_id)
-        p2 = placement_by_cp.get(rel.person2_id)
-        if p1 is None or p2 is None:
+        plist1 = placements_by_cp.get(rel.person1_id)
+        plist2 = placements_by_cp.get(rel.person2_id)
+        if not plist1 or not plist2:
             continue  # one side not placed — skip
 
         c_delta = CLUSTER_GEN_DELTA.get(rel.rel_type)
         if c_delta is None:
             continue  # unknown cluster relationship type — skip
 
-        d1 = GEN_DIST.get(p1.relationship_type)
-        d2 = GEN_DIST.get(p2.relationship_type)
-        if d1 is None or d2 is None:
-            continue  # ambiguous generational distance — skip
+        for p1 in plist1:
+            for p2 in plist2:
+                d1 = GEN_DIST.get(p1.relationship_type)
+                d2 = GEN_DIST.get(p2.relationship_type)
+                if d1 is None or d2 is None:
+                    continue  # ambiguous generational distance — skip
 
-        # Expected generational difference between the two tree persons:
-        # tp1 should be (c_delta + d1 - d2) generations older than tp2.
-        # Derivation: G_tp1 = G_cp1 + d1; G_tp2 = G_cp2 + d2;
-        #             G_cp1 - G_cp2 = c_delta  →  G_tp1 - G_tp2 = c_delta + d1 - d2
-        expected_tp_gen_diff = c_delta + d1 - d2
+                # Expected generational difference between the two tree persons:
+                # tp1 should be (c_delta + d1 - d2) generations older than tp2.
+                # Derivation: G_tp = G_cp + d  →  G_tp1 - G_tp2 = c_delta + d1 - d2
+                expected = c_delta + d1 - d2
 
-        if p1.tree_person_id == p2.tree_person_id:
-            # Same tree person: the generational gap between the two cluster
-            # persons as seen from the same tree node must be zero.
-            if expected_tp_gen_diff != 0:
-                return False
-        else:
-            # Different tree persons: use birth years when available.
-            by1 = p1.tree_person_birth_year
-            by2 = p2.tree_person_birth_year
-            if by1 is not None and by2 is not None:
-                # tp1 older by expected_tp_gen_diff gens means tp1 born earlier,
-                # i.e., by2 - by1 ≈ expected_tp_gen_diff * AVG_GEN_YEARS
-                actual_gen_diff = (by2 - by1) / AVG_GEN_YEARS
-                if abs(actual_gen_diff - expected_tp_gen_diff) > GEN_BIRTH_TOLERANCE:
-                    return False
+                if p1.tree_person_id == p2.tree_person_id:
+                    # Same tree person must satisfy the constraint exactly.
+                    if expected != 0:
+                        return False
+                else:
+                    # Different tree persons: use birth years when available.
+                    by1 = p1.tree_person_birth_year
+                    by2 = p2.tree_person_birth_year
+                    if by1 is not None and by2 is not None:
+                        actual = (by2 - by1) / AVG_GEN_YEARS
+                        if abs(actual - expected) > GEN_BIRTH_TOLERANCE:
+                            return False
 
     return True

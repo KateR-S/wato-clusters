@@ -184,6 +184,65 @@ def test_generate_hypotheses_birth_year_prunes_parent(db):
             ), "Parent relationship should have been pruned by birth year constraint"
 
 
+def test_all_match_pairs_in_hypothesis(db):
+    """
+    When multiple cluster persons each match multiple tree persons, every
+    hypothesis must contain one placement per (cluster_person, tree_person)
+    match pair — i.e. the full cross-product of matched pairs.
+    """
+    from app.auth import hash_password
+
+    user = models.User(email="cross@test.com", hashed_password=hash_password("pw"))
+    db.add(user)
+    db.flush()
+
+    tree = models.Tree(user_id=user.id, name="Cross Tree")
+    db.add(tree)
+    db.flush()
+
+    tp1 = models.Person(tree_id=tree.id, first_name="Tree", last_name="One", birth_year=1930, sex="M")
+    tp2 = models.Person(tree_id=tree.id, first_name="Tree", last_name="Two", birth_year=1960, sex="F")
+    db.add_all([tp1, tp2])
+    db.flush()
+
+    cluster = models.Cluster(user_id=user.id, name="Cross Cluster")
+    db.add(cluster)
+    db.flush()
+
+    cp1 = models.ClusterPerson(cluster_id=cluster.id, name="Cluster One", birth_year=1958)
+    cp2 = models.ClusterPerson(cluster_id=cluster.id, name="Cluster Two", birth_year=1962)
+    db.add_all([cp1, cp2])
+    db.flush()
+
+    # cp1 matches both tp1 and tp2; cp2 matches both tp1 and tp2 → 4 match pairs
+    for cp, (tp, cm) in [
+        (cp1, (tp1, 889.0)),   # 1st_cousin range
+        (cp1, (tp2, 889.0)),   # 1st_cousin range
+        (cp2, (tp1, 889.0)),   # 1st_cousin range
+        (cp2, (tp2, 889.0)),   # 1st_cousin range
+    ]:
+        db.add(models.Match(
+            tree_id=tree.id, person_id=tp.id,
+            cluster_person_id=cp.id, centimorgans=cm,
+        ))
+    db.commit()
+    db.refresh(tree)
+    db.refresh(cluster)
+
+    hypotheses = generate_hypotheses(db, tree, cluster)
+    assert len(hypotheses) > 0
+
+    expected_pairs = {
+        (cp1.id, tp1.id), (cp1.id, tp2.id),
+        (cp2.id, tp1.id), (cp2.id, tp2.id),
+    }
+    for hyp in hypotheses:
+        actual_pairs = {(p.cluster_person_id, p.tree_person_id) for p in hyp.placements}
+        assert actual_pairs == expected_pairs, (
+            f"Hypothesis placements {actual_pairs} != expected {expected_pairs}"
+        )
+
+
 def test_sibling_consistency_same_tree_person(db):
     """
     Two cluster half-siblings that both match the same tree person must be
