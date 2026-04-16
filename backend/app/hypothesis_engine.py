@@ -161,6 +161,17 @@ def _cm_score(cm: float, rel_type: str) -> float:
     return 0.0
 
 
+def _rel_type_str(rel_type) -> str:
+    """Normalise a rel_type to a plain string.
+
+    SQLAlchemy may return an Enum column as either the raw string value or as
+    the enum object itself depending on the database driver.  Using .value
+    (when present) ensures we always get the string regardless of which form
+    is returned.
+    """
+    return rel_type.value if hasattr(rel_type, "value") else rel_type
+
+
 def _build_tree_generations(
     tree_rels: list[models.Relationship],
     person_ids: set[int],
@@ -178,10 +189,7 @@ def _build_tree_generations(
     adj: dict[int, list[tuple[int, int]]] = {pid: [] for pid in person_ids}
     for rel in tree_rels:
         p1, p2 = rel.person1_id, rel.person2_id
-        # rel_type is stored as a string in SQLAlchemy's Enum column but may be
-        # returned as either the raw string or the enum object depending on the
-        # driver; normalise to string value to be safe.
-        rtype = rel.rel_type.value if hasattr(rel.rel_type, "value") else rel.rel_type
+        rtype = _rel_type_str(rel.rel_type)
         if rtype in ("parent", "half_parent"):
             # p1 is older (parent) → gen[p2] = gen[p1] - 1
             adj[p1].append((p2, -1))
@@ -501,7 +509,7 @@ def _combo_consistent(
         c_delta = CLUSTER_GEN_DELTA.get(rel.rel_type)
         if c_delta is None:
             continue
-        rel_type_str = rel.rel_type.value if hasattr(rel.rel_type, "value") else rel.rel_type
+        rel_type_str = _rel_type_str(rel.rel_type)
         require_same_rel = rel_type_str in _SIBLING_CLUSTER_RELS
         for p1 in plist1:
             for p2 in plist2:

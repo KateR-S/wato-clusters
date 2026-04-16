@@ -485,7 +485,7 @@ def test_half_sibling_same_gen_diff_rel_type_rejected(db):
     )
 
 
-
+def test_tree_relative_consistency_same_gen(db):
     """
     When a cluster person matches two tree persons who are same-generation
     siblings, both relationships must have the same generational distance.
