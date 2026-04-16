@@ -327,7 +327,9 @@ def _combo_consistent(
                 expected = c_delta + d1 - d2
 
                 if p1.tree_person_id == p2.tree_person_id:
-                    # Same tree person must satisfy the constraint exactly.
+                    # Same tree person: both cluster persons must relate to it at
+                    # the same generational offset implied by their cluster
+                    # relationship.  If expected != 0 the combo is inconsistent.
                     if expected != 0:
                         return False
                 else:
