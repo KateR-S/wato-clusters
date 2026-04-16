@@ -155,6 +155,9 @@ def _build_tree_generations(
     adj: dict[int, list[tuple[int, int]]] = {pid: [] for pid in person_ids}
     for rel in tree_rels:
         p1, p2 = rel.person1_id, rel.person2_id
+        # rel_type is stored as a string in SQLAlchemy's Enum column but may be
+        # returned as either the raw string or the enum object depending on the
+        # driver; normalise to string value to be safe.
         rtype = rel.rel_type.value if hasattr(rel.rel_type, "value") else rel.rel_type
         if rtype in ("parent", "half_parent"):
             # p1 is older (parent) → gen[p2] = gen[p1] - 1
@@ -179,13 +182,13 @@ def _build_tree_generations(
         gen[start] = 0
         queue: list[int] = [start]
         while queue:
-            nxt: list[int] = []
+            next_queue: list[int] = []
             for curr in queue:
                 for neighbor, delta in adj.get(curr, []):
                     if neighbor not in gen:
                         gen[neighbor] = gen[curr] + delta
-                        nxt.append(neighbor)
-            queue = nxt
+                        next_queue.append(neighbor)
+            queue = next_queue
 
     return gen
 

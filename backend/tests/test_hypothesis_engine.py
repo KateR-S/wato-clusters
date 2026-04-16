@@ -1,4 +1,5 @@
 import pytest
+from app.auth import hash_password
 from app.hypothesis_engine import (
     generate_hypotheses,
     _cm_score,
@@ -334,32 +335,29 @@ def test_half_sibling_removed_rel_same_tree_person_rejected(db):
     distance.  1st_cousin_1r (d=±1) paired with half_1st_cousin (d=0) must be
     rejected because no d1 in {1,-1} and d2 in {0} satisfies d1-d2=0.
     """
-    from app.auth import hash_password
-    import app.models as m
-
-    user = m.User(email="removed@test.com", hashed_password=hash_password("pw"))
+    user = models.User(email="removed@test.com", hashed_password=hash_password("pw"))
     db.add(user)
     db.flush()
 
-    tree = m.Tree(user_id=user.id, name="T")
+    tree = models.Tree(user_id=user.id, name="T")
     db.add(tree)
     db.flush()
 
-    tp = m.Person(tree_id=tree.id, first_name="Tree", last_name="Person",
-                  birth_year=1950, sex="M")
+    tp = models.Person(tree_id=tree.id, first_name="Tree", last_name="Person",
+                       birth_year=1950, sex="M")
     db.add(tp)
     db.flush()
 
-    cluster = m.Cluster(user_id=user.id, name="C")
+    cluster = models.Cluster(user_id=user.id, name="C")
     db.add(cluster)
     db.flush()
 
-    cp_a = m.ClusterPerson(cluster_id=cluster.id, name="Half Sib A", birth_year=1975)
-    cp_b = m.ClusterPerson(cluster_id=cluster.id, name="Half Sib B", birth_year=1977)
+    cp_a = models.ClusterPerson(cluster_id=cluster.id, name="Half Sib A", birth_year=1975)
+    cp_b = models.ClusterPerson(cluster_id=cluster.id, name="Half Sib B", birth_year=1977)
     db.add_all([cp_a, cp_b])
     db.flush()
 
-    rel = m.ClusterRelationship(
+    rel = models.ClusterRelationship(
         cluster_id=cluster.id,
         person1_id=cp_a.id,
         person2_id=cp_b.id,
@@ -406,25 +404,22 @@ def test_tree_relative_consistency_same_gen(db):
     Pairing 1st_cousin (d=0) to T1 with 1st_cousin_1r (d=±1) to T2 must be
     rejected; pairing 1st_cousin with 1st_cousin must be accepted.
     """
-    from app.auth import hash_password
-    import app.models as m
-
-    user = m.User(email="treerel@test.com", hashed_password=hash_password("pw"))
+    user = models.User(email="treerel@test.com", hashed_password=hash_password("pw"))
     db.add(user)
     db.flush()
 
-    tree = m.Tree(user_id=user.id, name="T")
+    tree = models.Tree(user_id=user.id, name="T")
     db.add(tree)
     db.flush()
 
-    tp1 = m.Person(tree_id=tree.id, first_name="Sibling", last_name="A",
-                   birth_year=1960, sex="M")
-    tp2 = m.Person(tree_id=tree.id, first_name="Sibling", last_name="B",
-                   birth_year=1962, sex="F")
+    tp1 = models.Person(tree_id=tree.id, first_name="Sibling", last_name="A",
+                        birth_year=1960, sex="M")
+    tp2 = models.Person(tree_id=tree.id, first_name="Sibling", last_name="B",
+                        birth_year=1962, sex="F")
     db.add_all([tp1, tp2])
     db.flush()
 
-    tree_rel = m.Relationship(
+    tree_rel = models.Relationship(
         tree_id=tree.id,
         person1_id=tp1.id,
         person2_id=tp2.id,
@@ -433,11 +428,11 @@ def test_tree_relative_consistency_same_gen(db):
     db.add(tree_rel)
     db.flush()
 
-    cluster = m.Cluster(user_id=user.id, name="C")
+    cluster = models.Cluster(user_id=user.id, name="C")
     db.add(cluster)
     db.flush()
 
-    cp = m.ClusterPerson(cluster_id=cluster.id, name="Unknown", birth_year=1985)
+    cp = models.ClusterPerson(cluster_id=cluster.id, name="Unknown", birth_year=1985)
     db.add(cp)
     db.commit()
 
