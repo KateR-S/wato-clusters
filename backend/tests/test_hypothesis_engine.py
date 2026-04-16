@@ -3,6 +3,10 @@ from app.hypothesis_engine import (
     generate_hypotheses,
     _cm_score,
     _birth_year_ok,
+    _build_tree_generations,
+    _pair_gen_dist_ok,
+    _combo_consistent,
+    Placement,
     CM_RANGES,
 )
 from app import models
@@ -251,7 +255,6 @@ def test_sibling_consistency_same_tree_person(db):
     '1st_cousin' (gen 0) must be rejected.
     """
     from app.auth import hash_password
-    from app.hypothesis_engine import _combo_consistent, Placement
     import app.models as m
 
     # Build minimal model stubs via the DB to get real IDs
@@ -322,3 +325,150 @@ def test_sibling_consistency_same_tree_person(db):
     assert _combo_consistent((placement_a_ok, placement_b_ok), [rel]), (
         "Same-tree-person combo with equal gen dist for half-siblings must be accepted"
     )
+
+
+def test_half_sibling_removed_rel_same_tree_person_rejected(db):
+    """
+    Half-siblings (same generation, c_delta=0) matching the same tree person
+    must both be assigned relationship types with the same generational
+    distance.  1st_cousin_1r (d=±1) paired with half_1st_cousin (d=0) must be
+    rejected because no d1 in {1,-1} and d2 in {0} satisfies d1-d2=0.
+    """
+    from app.auth import hash_password
+    import app.models as m
+
+    user = m.User(email="removed@test.com", hashed_password=hash_password("pw"))
+    db.add(user)
+    db.flush()
+
+    tree = m.Tree(user_id=user.id, name="T")
+    db.add(tree)
+    db.flush()
+
+    tp = m.Person(tree_id=tree.id, first_name="Tree", last_name="Person",
+                  birth_year=1950, sex="M")
+    db.add(tp)
+    db.flush()
+
+    cluster = m.Cluster(user_id=user.id, name="C")
+    db.add(cluster)
+    db.flush()
+
+    cp_a = m.ClusterPerson(cluster_id=cluster.id, name="Half Sib A", birth_year=1975)
+    cp_b = m.ClusterPerson(cluster_id=cluster.id, name="Half Sib B", birth_year=1977)
+    db.add_all([cp_a, cp_b])
+    db.flush()
+
+    rel = m.ClusterRelationship(
+        cluster_id=cluster.id,
+        person1_id=cp_a.id,
+        person2_id=cp_b.id,
+        rel_type="half_sibling",
+    )
+    db.add(rel)
+    db.commit()
+
+    p_a_1r = Placement(
+        cluster_person_id=cp_a.id, cluster_person_name="Half Sib A",
+        tree_person_id=tp.id, tree_person_name="Tree Person",
+        tree_person_birth_year=1950,
+        relationship_type="1st_cousin_1r",  # d ∈ {+1, -1}
+        centimorgans=460.0, cm_score=0.7,
+    )
+    p_b_half = Placement(
+        cluster_person_id=cp_b.id, cluster_person_name="Half Sib B",
+        tree_person_id=tp.id, tree_person_name="Tree Person",
+        tree_person_birth_year=1950,
+        relationship_type="half_1st_cousin",  # d = 0
+        centimorgans=200.0, cm_score=0.6,
+    )
+    assert not _combo_consistent((p_a_1r, p_b_half), [rel]), (
+        "half_sibling pair with 1st_cousin_1r vs half_1st_cousin to same tree person must be rejected"
+    )
+
+    # Consistent: both 1st_cousin_1r (d=±1), same ambiguous set → d1-d2=0 is satisfiable
+    p_b_1r = Placement(
+        cluster_person_id=cp_b.id, cluster_person_name="Half Sib B",
+        tree_person_id=tp.id, tree_person_name="Tree Person",
+        tree_person_birth_year=1950,
+        relationship_type="1st_cousin_1r",  # d ∈ {+1, -1}
+        centimorgans=300.0, cm_score=0.6,
+    )
+    assert _combo_consistent((p_a_1r, p_b_1r), [rel]), (
+        "half_sibling pair both with 1st_cousin_1r to same tree person must be accepted"
+    )
+
+
+def test_tree_relative_consistency_same_gen(db):
+    """
+    When a cluster person matches two tree persons who are same-generation
+    siblings, both relationships must have the same generational distance.
+    Pairing 1st_cousin (d=0) to T1 with 1st_cousin_1r (d=±1) to T2 must be
+    rejected; pairing 1st_cousin with 1st_cousin must be accepted.
+    """
+    from app.auth import hash_password
+    import app.models as m
+
+    user = m.User(email="treerel@test.com", hashed_password=hash_password("pw"))
+    db.add(user)
+    db.flush()
+
+    tree = m.Tree(user_id=user.id, name="T")
+    db.add(tree)
+    db.flush()
+
+    tp1 = m.Person(tree_id=tree.id, first_name="Sibling", last_name="A",
+                   birth_year=1960, sex="M")
+    tp2 = m.Person(tree_id=tree.id, first_name="Sibling", last_name="B",
+                   birth_year=1962, sex="F")
+    db.add_all([tp1, tp2])
+    db.flush()
+
+    tree_rel = m.Relationship(
+        tree_id=tree.id,
+        person1_id=tp1.id,
+        person2_id=tp2.id,
+        rel_type="full_sibling",
+    )
+    db.add(tree_rel)
+    db.flush()
+
+    cluster = m.Cluster(user_id=user.id, name="C")
+    db.add(cluster)
+    db.flush()
+
+    cp = m.ClusterPerson(cluster_id=cluster.id, name="Unknown", birth_year=1985)
+    db.add(cp)
+    db.commit()
+
+    tree_gen = _build_tree_generations([tree_rel], {tp1.id, tp2.id})
+
+    p_t1 = Placement(
+        cluster_person_id=cp.id, cluster_person_name="Unknown",
+        tree_person_id=tp1.id, tree_person_name="Sibling A",
+        tree_person_birth_year=1960,
+        relationship_type="1st_cousin",  # d = 0
+        centimorgans=889.0, cm_score=0.9,
+    )
+    p_t2_bad = Placement(
+        cluster_person_id=cp.id, cluster_person_name="Unknown",
+        tree_person_id=tp2.id, tree_person_name="Sibling B",
+        tree_person_birth_year=1962,
+        relationship_type="1st_cousin_1r",  # d ∈ {+1, -1}; 0 not in set
+        centimorgans=600.0, cm_score=0.7,
+    )
+    assert not _combo_consistent((p_t1, p_t2_bad), [], tree_gen), (
+        "1st_cousin to T1 and 1st_cousin_1r to same-gen T2 must be rejected"
+    )
+
+    p_t2_ok = Placement(
+        cluster_person_id=cp.id, cluster_person_name="Unknown",
+        tree_person_id=tp2.id, tree_person_name="Sibling B",
+        tree_person_birth_year=1962,
+        relationship_type="1st_cousin",  # d = 0
+        centimorgans=600.0, cm_score=0.7,
+    )
+    assert _combo_consistent((p_t1, p_t2_ok), [], tree_gen), (
+        "1st_cousin to both same-gen tree persons must be accepted"
+    )
+

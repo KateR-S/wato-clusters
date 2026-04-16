@@ -42,6 +42,7 @@ CM_RANGES: dict[str, tuple[float, float]] = {
 # Generational distance: how many generations OLDER the tree person is
 # relative to the cluster person. Positive = tree person is older.
 # None = ambiguous (e.g., cousin-once-removed can be older or younger branch).
+# Kept for birth-year fallback (used when tree generation data is unavailable).
 GEN_DIST: dict[str, Optional[int]] = {
     "parent": 1,
     "child": -1,
@@ -62,6 +63,32 @@ GEN_DIST: dict[str, Optional[int]] = {
     "1st_cousin_2r": None,   # ambiguous
     "2nd_cousin_1r": None,   # ambiguous
     "3rd_cousin": 0,
+}
+
+# All *possible* generational distances per relationship type.
+# "Once removed" relationships (1r) can run in either direction (±1); "twice
+# removed" (2r) can be ±2.  This replaces the single-valued GEN_DIST for the
+# exact consistency checks when tree generation numbers are available.
+GEN_DIST_POSSIBLE: dict[str, set[int]] = {
+    "parent":            {1},
+    "child":             {-1},
+    "full_sibling":      {0},
+    "half_sibling":      {0},
+    "grandparent":       {2},
+    "grandchild":        {-2},
+    "aunt_uncle":        {1},
+    "niece_nephew":      {-1},
+    "half_aunt_uncle":   {1},
+    "half_niece_nephew": {-1},
+    "great_grandparent": {3},
+    "great_grandchild":  {-3},
+    "1st_cousin":        {0},
+    "half_1st_cousin":   {0},
+    "1st_cousin_1r":     {1, -1},   # once removed: +1 or -1
+    "2nd_cousin":        {0},
+    "1st_cousin_2r":     {2, -2},   # twice removed: +2 or -2
+    "2nd_cousin_1r":     {1, -1},   # once removed: +1 or -1
+    "3rd_cousin":        {0},
 }
 
 # Generational delta for cluster relationships: how many generations older
@@ -109,6 +136,72 @@ def _cm_score(cm: float, rel_type: str) -> float:
     # Gaussian-like: 1 at midpoint, 0 at edges
     distance = abs(cm - midpoint) / half_width
     return max(0.0, 1.0 - distance)
+
+
+def _build_tree_generations(
+    tree_rels: list[models.Relationship],
+    person_ids: set[int],
+) -> dict[int, int]:
+    """
+    Assign an integer generation number to each tree person by BFS over the
+    direct tree relationships.  Higher number = older generation.
+
+    Returns a dict mapping person_id → generation number.  Persons that are
+    not connected to any other person (isolated nodes) are assigned generation
+    0.  Persons with no path to the BFS start are omitted; in practice all
+    persons in a well-formed tree should be reachable.
+    """
+    # adjacency: (neighbor_id, gen_delta) where gen_delta = gen[neighbor] - gen[self]
+    adj: dict[int, list[tuple[int, int]]] = {pid: [] for pid in person_ids}
+    for rel in tree_rels:
+        p1, p2 = rel.person1_id, rel.person2_id
+        rtype = rel.rel_type.value if hasattr(rel.rel_type, "value") else rel.rel_type
+        if rtype in ("parent", "half_parent"):
+            # p1 is older (parent) → gen[p2] = gen[p1] - 1
+            adj[p1].append((p2, -1))
+            adj[p2].append((p1, +1))
+        elif rtype in ("child", "half_child"):
+            # p1 is younger (child) → gen[p2] = gen[p1] + 1
+            adj[p1].append((p2, +1))
+            adj[p2].append((p1, -1))
+        elif rtype in ("full_sibling", "half_sibling", "spouse"):
+            adj[p1].append((p2, 0))
+            adj[p2].append((p1, 0))
+
+    if not person_ids:
+        return {}
+
+    gen: dict[int, int] = {}
+    # BFS from each unvisited person to handle disconnected components
+    for start in person_ids:
+        if start in gen:
+            continue
+        gen[start] = 0
+        queue: list[int] = [start]
+        while queue:
+            nxt: list[int] = []
+            for curr in queue:
+                for neighbor, delta in adj.get(curr, []):
+                    if neighbor not in gen:
+                        gen[neighbor] = gen[curr] + delta
+                        nxt.append(neighbor)
+            queue = nxt
+
+    return gen
+
+
+def _pair_gen_dist_ok(required_d_diff: int, rel1: str, rel2: str) -> bool:
+    """
+    Return True if there exist d1 ∈ GEN_DIST_POSSIBLE[rel1] and
+    d2 ∈ GEN_DIST_POSSIBLE[rel2] such that d1 - d2 == required_d_diff.
+
+    Returns True (unchecked) if either relationship type is not in the table.
+    """
+    p1 = GEN_DIST_POSSIBLE.get(rel1)
+    p2 = GEN_DIST_POSSIBLE.get(rel2)
+    if not p1 or not p2:
+        return True
+    return any((d1 - required_d_diff) in p2 for d1 in p1)
 
 
 def _birth_year_ok(
@@ -175,6 +268,11 @@ def generate_hypotheses(
     cluster_people: dict[int, models.ClusterPerson] = {p.id: p for p in cluster.people}
     cluster_rels: list[models.ClusterRelationship] = cluster.relationships
 
+    # Build generation numbers for all tree persons from the tree's relationships
+    tree_gen: dict[int, int] = _build_tree_generations(
+        tree.relationships, set(tree_people.keys())
+    )
+
     # matches grouped by cluster_person_id
     matches_by_cp: dict[int, list[models.Match]] = {}
     for m in tree.matches:
@@ -239,7 +337,7 @@ def generate_hypotheses(
             continue
         if any(p.cm_score <= 0 for p in combo):
             continue
-        if not _combo_consistent(combo, cluster_rels):
+        if not _combo_consistent(combo, cluster_rels, tree_gen):
             continue
 
         score = math.exp(
@@ -282,63 +380,93 @@ def generate_hypotheses(
 def _combo_consistent(
     combo: tuple[Placement, ...],
     cluster_rels: list[models.ClusterRelationship],
+    tree_gen: Optional[dict[int, int]] = None,
 ) -> bool:
     """
-    Consistency check for a combination of placements against the declared
-    inter-cluster relationships.
+    Consistency check for a combination of placements.
 
-    A combo now contains one Placement per (cluster_person, tree_person) match
-    pair, so each cluster person may have multiple placements.  For every
-    cluster relationship between two cluster persons we check every combination
-    of their respective placements:
+    Unified constraint
+    ------------------
+    For any two placements p1 (cluster person cp1 → tree person T1, rel1) and
+    p2 (cluster person cp2 → tree person T2, rel2) where cp1 and cp2 have a
+    known generational gap c_delta = G(cp1) - G(cp2):
 
-    - Same tree person: the expected generational difference between the two
-      tree placements must be exactly zero (a single node cannot be at two
-      different generational positions simultaneously).
-    - Different tree persons: when both birth years are known we verify that
-      the birth-year difference is consistent with the expected generational
-      gap (within ±1.5 generation tolerance).
+        d1 - d2  =  (gen[T1] - gen[T2])  -  c_delta
+
+    where d1 ∈ GEN_DIST_POSSIBLE[rel1] and d2 ∈ GEN_DIST_POSSIBLE[rel2].
+
+    This single formula covers:
+      • Same cluster person (c_delta = 0), placements to different tree
+        persons (Check A): enforces that the cluster person is at a
+        self-consistent generational level across all matched tree persons.
+      • Different cluster persons with a known relationship, any pair of
+        their tree placements (Check B): enforces that the inter-cluster
+        generational gap is reflected in the tree placements.
+
+    When exact tree generation numbers are unavailable (tree_gen is empty or a
+    tree person is not in it), the function falls back to birth-year tolerance
+    for cross-tree-person pairs and to GEN_DIST_POSSIBLE for same-tree-person
+    pairs.
     """
+    if tree_gen is None:
+        tree_gen = {}
+
     # Group placements by cluster person (multiple entries per cp in new model)
     placements_by_cp: dict[int, list[Placement]] = {}
     for p in combo:
         placements_by_cp.setdefault(p.cluster_person_id, []).append(p)
 
-    for rel in cluster_rels:
-        plist1 = placements_by_cp.get(rel.person1_id)
-        plist2 = placements_by_cp.get(rel.person2_id)
-        if not plist1 or not plist2:
-            continue  # one side not placed — skip
+    def _check_pair(p1: Placement, p2: Placement, c_delta: int) -> bool:
+        """
+        Return False if p1 and p2 violate the unified generational constraint
+        given the cluster-level generation gap c_delta = G(cp1) - G(cp2).
+        """
+        t1_gen = tree_gen.get(p1.tree_person_id)
+        t2_gen = tree_gen.get(p2.tree_person_id)
 
-        c_delta = CLUSTER_GEN_DELTA.get(rel.rel_type)
-        if c_delta is None:
-            continue  # unknown cluster relationship type — skip
+        if t1_gen is not None and t2_gen is not None:
+            # Exact check using tree generation numbers.
+            required = (t1_gen - t2_gen) - c_delta
+            return _pair_gen_dist_ok(required, p1.relationship_type, p2.relationship_type)
 
-        for p1 in plist1:
-            for p2 in plist2:
+        # ── Fallback when exact tree gen data is unavailable ──────────────
+        if p1.tree_person_id == p2.tree_person_id:
+            # Same tree person → tree_gd = 0 exactly.
+            required = -c_delta
+            return _pair_gen_dist_ok(required, p1.relationship_type, p2.relationship_type)
+        else:
+            # Different tree persons: approximate via birth years.
+            by1 = p1.tree_person_birth_year
+            by2 = p2.tree_person_birth_year
+            if by1 is not None and by2 is not None:
+                # higher gen = older = earlier birth year
+                # gen[T1] - gen[T2] ≈ (by2 - by1) / AVG_GEN_YEARS
+                actual_tree_gd = (by2 - by1) / AVG_GEN_YEARS
                 d1 = GEN_DIST.get(p1.relationship_type)
                 d2 = GEN_DIST.get(p2.relationship_type)
-                if d1 is None or d2 is None:
-                    continue  # ambiguous generational distance — skip
-
-                # Expected generational difference between the two tree persons:
-                # tp1 should be (c_delta + d1 - d2) generations older than tp2.
-                # Derivation: G_tp = G_cp + d  →  G_tp1 - G_tp2 = c_delta + d1 - d2
-                expected = c_delta + d1 - d2
-
-                if p1.tree_person_id == p2.tree_person_id:
-                    # Same tree person: both cluster persons must relate to it at
-                    # the same generational offset implied by their cluster
-                    # relationship.  If expected != 0 the combo is inconsistent.
-                    if expected != 0:
+                if d1 is not None and d2 is not None:
+                    # expected tree_gd = (d1 - d2) + c_delta
+                    if abs(actual_tree_gd - ((d1 - d2) + c_delta)) > GEN_BIRTH_TOLERANCE:
                         return False
-                else:
-                    # Different tree persons: use birth years when available.
-                    by1 = p1.tree_person_birth_year
-                    by2 = p2.tree_person_birth_year
-                    if by1 is not None and by2 is not None:
-                        actual = (by2 - by1) / AVG_GEN_YEARS
-                        if abs(actual - expected) > GEN_BIRTH_TOLERANCE:
-                            return False
+        return True
+
+    # ── Check A: same cluster person, all pairs of their tree-person placements ──
+    for plist in placements_by_cp.values():
+        for i in range(len(plist)):
+            for j in range(i + 1, len(plist)):
+                if not _check_pair(plist[i], plist[j], c_delta=0):
+                    return False
+
+    # ── Check B: pairs across different cluster persons with a known relationship ─
+    for rel in cluster_rels:
+        plist1 = placements_by_cp.get(rel.person1_id, [])
+        plist2 = placements_by_cp.get(rel.person2_id, [])
+        c_delta = CLUSTER_GEN_DELTA.get(rel.rel_type)
+        if c_delta is None:
+            continue
+        for p1 in plist1:
+            for p2 in plist2:
+                if not _check_pair(p1, p2, c_delta=c_delta):
+                    return False
 
     return True
