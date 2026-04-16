@@ -106,6 +106,17 @@ CLUSTER_GEN_DELTA: dict[str, int] = {
 AVG_GEN_YEARS = 25       # average years per generation
 GEN_BIRTH_TOLERANCE = 1.5  # allow ±1.5 generation tolerance in birth year checks
 
+# Soft cM extension: allow values up to this fraction of half-width beyond the
+# standard range boundary.  Values in the soft zone receive a tiny positive
+# score (≤ 0.05) so natural cM variation does not silently exclude the correct
+# hypothesis from consideration.
+CM_SOFT_EXTEND_FACTOR = 0.25
+
+# Cluster relationship types where two persons share exactly one (or both)
+# parents and therefore must have the IDENTICAL relationship type to any
+# shared tree person — not merely the same generational distance.
+_SIBLING_CLUSTER_RELS: frozenset[str] = frozenset({"full_sibling", "half_sibling"})
+
 MIN_PARENT_AGE = 14
 
 
@@ -123,19 +134,31 @@ class Placement:
 
 
 def _cm_score(cm: float, rel_type: str) -> float:
-    """Return a 0-1 score for how well a cM value fits a relationship type."""
+    """Return a 0-1 score for how well a cM value fits a relationship type.
+
+    Values within the standard ISOGG range score between 0 (at the boundary)
+    and 1 (at the midpoint).  Values slightly outside the range — within
+    CM_SOFT_EXTEND_FACTOR of the boundary — receive a tiny positive score
+    (≤ 0.05) so that natural cM variation does not silently exclude the
+    correct hypothesis from consideration.  Values beyond the soft zone
+    score 0 and are never used as candidates.
+    """
     if rel_type not in CM_RANGES:
         return 0.0
     lo, hi = CM_RANGES[rel_type]
-    if cm < lo or cm > hi:
-        return 0.0
     if lo == hi:
-        return 1.0
+        return 1.0 if cm == lo else 0.0
     midpoint = (lo + hi) / 2
     half_width = (hi - lo) / 2
-    # Gaussian-like: 1 at midpoint, 0 at edges
     distance = abs(cm - midpoint) / half_width
-    return max(0.0, 1.0 - distance)
+    if distance <= 1.0:
+        # Within standard range: 1.0 at midpoint, 0.0 at boundaries.
+        return 1.0 - distance
+    soft_limit = 1.0 + CM_SOFT_EXTEND_FACTOR
+    if distance <= soft_limit:
+        # Soft zone: tiny positive score, decreasing to 0 at the soft limit.
+        return (soft_limit - distance) / CM_SOFT_EXTEND_FACTOR * 0.05
+    return 0.0
 
 
 def _build_tree_generations(
@@ -302,9 +325,7 @@ def generate_hypotheses(
             pair = (cp_id, tp.id)
             pair_cands: list[Placement] = []
 
-            for rel_type, (lo, hi) in CM_RANGES.items():
-                if cm < lo or cm > hi:
-                    continue
+            for rel_type in CM_RANGES:
                 score = _cm_score(cm, rel_type)
                 if score <= 0:
                     continue
@@ -419,11 +440,24 @@ def _combo_consistent(
     for p in combo:
         placements_by_cp.setdefault(p.cluster_person_id, []).append(p)
 
-    def _check_pair(p1: Placement, p2: Placement, c_delta: int) -> bool:
+    def _check_pair(p1: Placement, p2: Placement, c_delta: int,
+                    require_same_rel: bool = False) -> bool:
         """
         Return False if p1 and p2 violate the unified generational constraint
         given the cluster-level generation gap c_delta = G(cp1) - G(cp2).
+
+        When require_same_rel is True (half-/full-sibling cluster pairs), the
+        two placements must also use the *identical* relationship type when they
+        point to the same tree person.  Two half-siblings connect to the tree
+        through their single shared parent, so their relationship to any tree
+        person must be exactly the same — not merely the same generational
+        distance.  1st_cousin (d=0) vs half_1st_cousin (d=0) to the same
+        person must therefore be rejected.
         """
+        # Sibling constraint: identical rel type required for same tree person.
+        if require_same_rel and p1.tree_person_id == p2.tree_person_id:
+            if p1.relationship_type != p2.relationship_type:
+                return False
         t1_gen = tree_gen.get(p1.tree_person_id)
         t2_gen = tree_gen.get(p2.tree_person_id)
 
@@ -467,9 +501,12 @@ def _combo_consistent(
         c_delta = CLUSTER_GEN_DELTA.get(rel.rel_type)
         if c_delta is None:
             continue
+        rel_type_str = rel.rel_type.value if hasattr(rel.rel_type, "value") else rel.rel_type
+        require_same_rel = rel_type_str in _SIBLING_CLUSTER_RELS
         for p1 in plist1:
             for p2 in plist2:
-                if not _check_pair(p1, p2, c_delta=c_delta):
+                if not _check_pair(p1, p2, c_delta=c_delta,
+                                   require_same_rel=require_same_rel):
                     return False
 
     return True

@@ -397,7 +397,95 @@ def test_half_sibling_removed_rel_same_tree_person_rejected(db):
     )
 
 
-def test_tree_relative_consistency_same_gen(db):
+def test_cm_score_soft_extension():
+    """Values just outside the standard range get a small but positive score."""
+    lo, hi = CM_RANGES["1st_cousin_1r"]  # 141, 851
+    half_width = (hi - lo) / 2           # 355
+    midpoint = (lo + hi) / 2             # 496
+
+    # Value inside range: normal score
+    assert _cm_score(midpoint, "1st_cousin_1r") == 1.0
+
+    # Value just below lower boundary (in soft zone): tiny positive score
+    cm_soft = lo - half_width * 0.1  # ~105 cM
+    score_soft = _cm_score(cm_soft, "1st_cousin_1r")
+    assert score_soft > 0.0, "Value in soft zone below lo should have tiny positive score"
+    assert score_soft < 0.05, "Soft-zone score must be < 0.05"
+
+    # Value well outside soft zone: must be 0
+    cm_far = lo - half_width * 0.5  # well beyond soft limit
+    assert _cm_score(cm_far, "1st_cousin_1r") == 0.0
+
+
+def test_half_sibling_same_gen_diff_rel_type_rejected(db):
+    """
+    Half-siblings to the same tree person must have the EXACT same relationship
+    type, not merely the same generational distance.
+
+    1st_cousin (d=0) paired with half_1st_cousin (d=0) must be rejected even
+    though both have generational distance 0.  Likewise 1st_cousin vs
+    2nd_cousin (both d=0).  Only same-type pairs (e.g. both 1st_cousin) are
+    accepted.
+    """
+    user = models.User(email="samedtype@test.com",
+                       hashed_password=hash_password("pw"))
+    db.add(user)
+    db.flush()
+
+    tree = models.Tree(user_id=user.id, name="T")
+    db.add(tree)
+    db.flush()
+
+    tp = models.Person(tree_id=tree.id, first_name="Shared", last_name="Person",
+                       birth_year=1947, sex="M")
+    db.add(tp)
+    db.flush()
+
+    cluster = models.Cluster(user_id=user.id, name="C")
+    db.add(cluster)
+    db.flush()
+
+    cp_a = models.ClusterPerson(cluster_id=cluster.id, name="Will", birth_year=1975)
+    cp_b = models.ClusterPerson(cluster_id=cluster.id, name="Hayleigh", birth_year=1965)
+    db.add_all([cp_a, cp_b])
+    db.flush()
+
+    rel = models.ClusterRelationship(
+        cluster_id=cluster.id,
+        person1_id=cp_a.id,
+        person2_id=cp_b.id,
+        rel_type="half_sibling",
+    )
+    db.add(rel)
+    db.commit()
+
+    # Bad: 1st_cousin (d=0) vs half_1st_cousin (d=0) — different types, same d
+    p_a_1c = Placement(cp_a.id, "Will", tp.id, "Shared Person", 1947,
+                       "1st_cousin", 1009.0, 0.8)
+    p_b_half = Placement(cp_b.id, "Hayleigh", tp.id, "Shared Person", 1947,
+                         "half_1st_cousin", 583.0, 0.6)
+    assert not _combo_consistent((p_a_1c, p_b_half), [rel]), (
+        "half_sibling pair: 1st_cousin vs half_1st_cousin (same d=0) to same "
+        "tree person must be rejected"
+    )
+
+    # Bad: 1st_cousin (d=0) vs 2nd_cousin (d=0) — different types, same d
+    p_b_2c = Placement(cp_b.id, "Hayleigh", tp.id, "Shared Person", 1947,
+                       "2nd_cousin", 583.0, 0.6)
+    assert not _combo_consistent((p_a_1c, p_b_2c), [rel]), (
+        "half_sibling pair: 1st_cousin vs 2nd_cousin (same d=0) to same "
+        "tree person must be rejected"
+    )
+
+    # Good: both 1st_cousin (same type, same d)
+    p_b_1c = Placement(cp_b.id, "Hayleigh", tp.id, "Shared Person", 1947,
+                       "1st_cousin", 583.0, 0.7)
+    assert _combo_consistent((p_a_1c, p_b_1c), [rel]), (
+        "half_sibling pair: both 1st_cousin to same tree person must be accepted"
+    )
+
+
+
     """
     When a cluster person matches two tree persons who are same-generation
     siblings, both relationships must have the same generational distance.
