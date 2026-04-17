@@ -360,10 +360,11 @@ def generate_hypotheses(
                 if locked_rel is not None and rel_type != locked_rel:
                     continue
                 is_anchor = locked_rel is not None
-                # Bypass birth-year constraints for anchored pairs — the user
-                # is explicitly positing this relationship.
-                if not is_anchor and not _birth_year_ok(tp.birth_year, cp.birth_year, rel_type):
-                    continue
+                if not is_anchor:
+                    # Bypass birth-year constraints for anchored pairs — the
+                    # user is explicitly positing this relationship.
+                    if not _birth_year_ok(tp.birth_year, cp.birth_year, rel_type):
+                        continue
                 score = _cm_score(cm, rel_type)
                 if score <= 0:
                     if is_anchor:

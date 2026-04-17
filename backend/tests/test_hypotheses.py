@@ -233,6 +233,7 @@ def test_evaluate_no_anchors_equivalent_to_hypotheses(client, headers, tree, clu
     assert hyp_rels == eval_rels
 
 
+def test_birth_year_constraint_respected(client, headers, tree, cluster):
     """
     A tree person born in 1990 cannot be the parent of a cluster person born in 1989.
     Hypotheses with 'parent' relationship in that direction should be pruned.
