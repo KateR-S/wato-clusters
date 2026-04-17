@@ -61,6 +61,12 @@ export interface Match {
   centimorgans: number;
 }
 
+export interface AnchorEntry {
+  cluster_person_id: number;
+  tree_person_id: number;
+  relationship: string;
+}
+
 export interface PlacementHypothesis {
   cluster_person_id: number;
   cluster_person_name: string;

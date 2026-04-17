@@ -214,6 +214,18 @@ class HypothesisRequest(BaseModel):
     cluster_id: int
 
 
+class AnchorEntry(BaseModel):
+    """A single posited (cluster_person, tree_person, relationship) anchor."""
+    cluster_person_id: int
+    tree_person_id: int
+    relationship: str
+
+
+class EvaluateRequest(BaseModel):
+    cluster_id: int
+    anchors: list[AnchorEntry]
+
+
 class PlacementEntry(BaseModel):
     cluster_person_id: int
     cluster_person_name: str

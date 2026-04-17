@@ -119,6 +119,13 @@ _SIBLING_CLUSTER_RELS: frozenset[str] = frozenset({"full_sibling", "half_sibling
 
 MIN_PARENT_AGE = 14
 
+# Minimum cm_score assigned to a user-anchored pair whose observed cM falls
+# completely outside the expected range (including the soft zone).  The tiny
+# value ensures the anchored pair always generates a candidate so the engine
+# can evaluate and score the hypothesis rather than silently dropping it.
+# Birth-year and consistency constraints are also bypassed for anchors.
+MIN_ANCHOR_SCORE = 0.001
+
 
 @dataclass
 class Placement:
@@ -271,6 +278,7 @@ def generate_hypotheses(
     db: Session,
     tree: models.Tree,
     cluster: models.Cluster,
+    locked_pairs: Optional[dict[tuple[int, int], str]] = None,
 ) -> list[HypothesisOut]:
     """
     Generate ranked placement hypotheses for a cluster onto a tree.
@@ -296,7 +304,20 @@ def generate_hypotheses(
 
     Each hypothesis is scored as the geometric mean of individual cm_scores
     and returned sorted descending.
+
+    Parameters
+    ----------
+    locked_pairs : optional dict mapping (cluster_person_id, tree_person_id)
+        to a specific relationship type string.  When provided, those pairs
+        are *anchored* — only the specified relationship is considered for
+        them, birth-year constraints are bypassed, and even if the observed
+        cM falls outside the expected range the pair still generates a
+        candidate (scored at MIN_ANCHOR_SCORE).  This allows the caller to
+        *posit* relationships and evaluate how well they fit.
     """
+    if locked_pairs is None:
+        locked_pairs = {}
+
     # ── Load data ─────────────────────────────────────────────────────────────
     tree_people: dict[int, models.Person] = {p.id: p for p in tree.people}
     cluster_people: dict[int, models.ClusterPerson] = {p.id: p for p in cluster.people}
@@ -332,13 +353,25 @@ def generate_hypotheses(
             cm = match.centimorgans
             pair = (cp_id, tp.id)
             pair_cands: list[Placement] = []
+            locked_rel = locked_pairs.get(pair)
 
             for rel_type in CM_RANGES:
+                # For anchored pairs accept only the locked rel_type.
+                if locked_rel is not None and rel_type != locked_rel:
+                    continue
+                is_anchor = locked_rel is not None
+                # Bypass birth-year constraints for anchored pairs — the user
+                # is explicitly positing this relationship.
+                if not is_anchor and not _birth_year_ok(tp.birth_year, cp.birth_year, rel_type):
+                    continue
                 score = _cm_score(cm, rel_type)
                 if score <= 0:
-                    continue
-                if not _birth_year_ok(tp.birth_year, cp.birth_year, rel_type):
-                    continue
+                    if is_anchor:
+                        # Always include the anchor even if cM is outside range;
+                        # use a minimum score so the hypothesis is evaluable.
+                        score = MIN_ANCHOR_SCORE
+                    else:
+                        continue
                 pair_cands.append(
                     Placement(
                         cluster_person_id=cp_id,

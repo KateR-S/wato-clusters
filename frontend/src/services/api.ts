@@ -101,6 +101,18 @@ export const getHypotheses = async (treeId: number, clusterId: number): Promise<
   return res.data;
 };
 
+export const evaluateHypothesis = async (
+  treeId: number,
+  clusterId: number,
+  anchors: import('../types').AnchorEntry[],
+): Promise<Hypothesis[]> => {
+  const res = await api.post<Hypothesis[]>(`/trees/${treeId}/evaluate`, {
+    cluster_id: clusterId,
+    anchors,
+  });
+  return res.data;
+};
+
 // Clusters
 export const getClusters = async (): Promise<Cluster[]> => {
   const res = await api.get<Cluster[]>('/clusters');
